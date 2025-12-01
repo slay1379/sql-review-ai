@@ -26,7 +26,7 @@ def check_security(sql: str):
     dangerous_keywords = ["DROP", "TRUNCATE", "DELETE", "ALTER", "GRANT"]
     for word in dangerous_keywords:
         if re.search(rf"\b{word}\b", sql, re.IGNORECASE):
-            warnings.append(f"⛔ 고위험 명령어 감지: {word}")
+            warnings.append(f"⛔ 고위험 명령어 감지!: {word}")
             max_severity = "high"
 
     # Medium severity
