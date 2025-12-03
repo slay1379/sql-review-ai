@@ -7,7 +7,7 @@ import subprocess
 import requests
 
 
-API_URL = os.environ["SQL_REVIEW_API_URL"]
+API_URL = os.getenv("SQL_REVIEW_API_URL", "http://localhost:8000/lint")
 
 
 def run(*args) -> str:
