@@ -36,9 +36,24 @@ jobs:
         run: |
           pip install requests
 
+      # 1) SSH 키 파일 만들기
+      - name: Configure SSH Key
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
+
+      # 2) Bastion 통해서 내부 SQLFluff API 로 터널 열기
+      - name: Start SSH Tunnel
+        run: |
+          ssh -o StrictHostKeyChecking=no -f -N \
+            -L 8000:${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000 \
+            ec2-user@${{ secrets.BASTION_HOST }} \
+            -i private_key.pem
+          echo "✅ SSH tunnel opened: localhost:8000 -> ${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000"
+
+      # 3) SQL 리뷰 스크립트 실행 (이제 localhost 로 호출)
       - name: Run SQL review
         env:
-          # 👉 여기를 네 sqlfluff API 주소로 바꿔라
-          SQL_REVIEW_API_URL: "http://52.78.226.187:8000/lint"
+          SQL_REVIEW_API_URL: "http://localhost:8000/lint"
         run: |
           python .github/workflows/run_sql_review.py
