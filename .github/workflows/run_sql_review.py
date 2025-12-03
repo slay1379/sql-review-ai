@@ -77,7 +77,7 @@ def call_sqlfluff_api(sql: str) -> dict:
     """FastAPI /lint 호출."""
     payload = {"sql": sql, "dialect": "ansi"}
     print(f"[sql-review] call API: {API_URL}")
-    resp = requests.post(API_URL, json=payload, timeout=10)
+    resp = requests.post(API_URL, json=payload, timeout=30)
 
     # 고위험 쿼리는 400 + status=blocked 로 떨어짐
     if resp.status_code == 400:
