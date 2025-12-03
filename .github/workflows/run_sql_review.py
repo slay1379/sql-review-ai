@@ -2,6 +2,7 @@ import os
 import subprocess
 import json
 import textwrap
+import subprocess
 
 import requests
 
@@ -9,37 +10,33 @@ import requests
 API_URL = os.environ["SQL_REVIEW_API_URL"]
 
 
-def run(cmd: list[str]) -> str:
-    """쉘 명령어 실행 후 stdout 문자열로 반환."""
-    out = subprocess.check_output(cmd, text=True)
-    return out.strip()
+def run(*args) -> str:
+    """git 명령어 래퍼 (이미 있다면 기존 거 써도 됨)"""
+    return subprocess.check_output(args, text=True)
 
 
 def get_changed_files() -> list[str]:
     """
-    변경된 파일 목록 가져오기.
-    - PR: base..HEAD diff
-    - push: HEAD^..HEAD diff
+    변경된 SQL 파일 목록을 리턴한다.
+
+    1) 보통은 HEAD^..HEAD diff 로 변경 파일만 가져옴
+    2) 첫 커밋이거나 HEAD^ 가 없어서 실패하면,
+       전체 트래킹 파일 목록에서 *.sql 만 가져오도록 fallback
     """
-    event_name = os.environ.get("GITHUB_EVENT_NAME", "")
-    print(f"[sql-review] event_name={event_name}")
+    try:
+        # 일반적인 케이스: 직전 커밋과 비교
+        out = run("git", "diff", "--name-only", "HEAD^", "HEAD")
+        files = [f for f in out.splitlines() if f.endswith(".sql")]
+        if files:
+            return files
+    except subprocess.CalledProcessError:
+        # HEAD^ 가 없거나 할 때 여기로 떨어짐
+        pass
 
-    if event_name == "pull_request":
-        event_path = os.environ["GITHUB_EVENT_PATH"]
-        with open(event_path, "r", encoding="utf-8") as f:
-            event = json.load(f)
-
-        base_sha = event["pull_request"]["base"]["sha"]
-        head_sha = event["pull_request"]["head"]["sha"]
-        diff_range = f"{base_sha}...{head_sha}"
-    else:
-        # push 혹은 수동 실행일 때는 직전 커밋과 비교
-        diff_range = "HEAD^..HEAD"
-
-    print(f"[sql-review] diff_range={diff_range}")
-    diff_files = run(["git", "diff", "--name-only", diff_range]).splitlines()
-    print(f"[sql-review] changed files: {diff_files}")
-    return diff_files
+    # 👉 fallback: 레포 전체에서 *.sql
+    out = run("git", "ls-files")
+    files = [f for f in out.splitlines() if f.endswith(".sql")]
+    return files
 
 
 def extract_sql_from_file(path: str) -> list[str]:
