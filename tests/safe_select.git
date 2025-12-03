@@ -8,4 +8,4 @@ SELECT
 FROM
     customers
 WHERE
-    risk_score >= 50;
+    risk_score >= 40;
