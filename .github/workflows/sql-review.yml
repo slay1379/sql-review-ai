@@ -1,0 +1,42 @@
+name: SQL Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/*.sql'
+      - '**/*.py'
+      - '**/*.js'
+      - '**/*.ts'
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.sql'
+      - '**/*.py'
+      - '**/*.js'
+      - '**/*.ts'
+  workflow_dispatch: {}
+
+jobs:
+  sql-review:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies for SQL review script
+        run: |
+          pip install requests
+
+      - name: Run SQL review
+        env:
+          # 👉 여기를 네 sqlfluff API 주소로 바꿔라
+          SQL_REVIEW_API_URL: "http://52.78.226.187:8000/lint"
+        run: |
+          python .github/workflows/run_sql_review.py
