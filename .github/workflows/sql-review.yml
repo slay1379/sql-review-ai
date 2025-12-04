@@ -68,3 +68,25 @@ jobs:
             echo "sql_review_report.md not found" >> $GITHUB_STEP_SUMMARY
           fi
 
+      - name: Comment SQL review result on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const path = 'sql_review_report.md';
+            if (!fs.existsSync(path)) {
+              core.info('sql_review_report.md not found, skip comment.');
+              return;
+            }
+            const body = fs.readFileSync(path, 'utf8');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.name,
+              issue_number: context.issue.number,
+              body,
+            });
+
+
