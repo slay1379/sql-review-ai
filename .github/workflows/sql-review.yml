@@ -57,3 +57,14 @@ jobs:
           SQL_REVIEW_API_URL: "http://localhost:8000/lint"
         run: |
           python .github/workflows/run_sql_review.py
+
+      - name: Attach SQL review report to Job Summary
+        if: always()
+        run: |
+          if [ -f sql_review_report.md ]; then
+            echo "## SQL Review Report" >> $GITHUB_STEP_SUMMARY
+            cat sql_review_report.md >> $GITHUB_STEP_SUMMARY
+          else
+            echo "sql_review_report.md not found" >> $GITHUB_STEP_SUMMARY
+          fi
+
