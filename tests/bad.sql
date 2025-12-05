@@ -1,2 +1,8 @@
--- 예약어 소문자 사용, SELECT * 사용 (경고 대상)
-select * from users where id = 1
+SELECT
+    customer_id,
+    name,
+    email
+FROM
+    customers
+WHERE
+    customer_id = '1'; -- customer_id는 VARCHAR 타입이므로 따옴표를 사용합니다.
