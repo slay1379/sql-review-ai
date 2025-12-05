@@ -1,2 +1,1 @@
--- 예약어 소문자 사용, SELECT * 사용 (경고 대상)
-select * from users where id = 1
+SELECT id, name, email FROM users WHERE id = 1;
