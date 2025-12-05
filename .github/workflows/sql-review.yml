@@ -14,32 +14,37 @@ on:
 jobs:
   sql-review:
     runs-on: ubuntu-latest
+
     permissions:
       contents: read
       pull-requests: write
 
     steps:
+      # 0. 레포 체크아웃
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 2
 
+      # 1. 파이썬 환경
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install requests
+        run: |
+          pip install requests
 
-      # 1) SSH 키 설정
+      # 2. SSH 키 설정 (Bastion 접속용)
       - name: Configure SSH Key
         run: |
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
           chmod 600 private_key.pem
 
-      # 2) Bastion 터널링 (Dify API 포트 5001 연결)
-      # 주의: Dify API 포트가 80이면 80으로, 5001이면 5001로 수정하세요!
+      # 3. Bastion → Dify API 터널링
+      #    GitHub Actions 컨테이너의 localhost:5001 이
+      #    실제 Dify API 프라이빗 IP:5001 로 포워딩됨
       - name: Start SSH Tunnel to Dify API
         run: |
           ssh -o StrictHostKeyChecking=no -f -N \
@@ -48,45 +53,54 @@ jobs:
             -i private_key.pem
           echo "✅ SSH tunnel opened: localhost:5001 -> ${{ secrets.DIFY_PRIVATE_IP }}:5001"
 
-      # 3) Dify Workflow 호출 및 리포트 생성
+      # 4. SQL 리뷰 실행 (Dify 워크플로 호출 + 리포트 md 생성)
       - name: Run SQL review (call Dify workflow)
         id: run_sql_review
         env:
-          DIFY_API_BASE: "http://localhost:5001/v1" # 터널링 주소
+          # FastAPI / Dify에서 사용하는 베이스 URL
+          DIFY_API_BASE: "http://localhost:5001/v1"
           DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
+          DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }}
         run: |
           python .github/workflows/run_sql_review.py
+        # 실행 결과에 따라 마지막 단계에서 fail 처리할 것이므로 여기선 계속 진행
         continue-on-error: true
 
-      # 4) PR 코멘트 작성
+      # 5. PR에 SQL Review Report 코멘트 달기
       - name: Comment SQL review result on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const fs = require('fs');
             const path = 'sql_review_report.md';
+
+            // 리포트 파일이 없으면 코멘트 생략
             if (!fs.existsSync(path)) {
               console.log('sql_review_report.md not found. Skip comment.');
               return;
             }
+
             const body = fs.readFileSync(path, 'utf8');
             const header = '# SQL Review Report';
+
             const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
 
+            // 기존 봇 코멘트가 있으면 업데이트, 없으면 새로 작성
             const { data: comments } = await github.rest.issues.listComments({
               owner,
               repo,
               issue_number,
             });
 
-            const botComment = comments.find(c =>
-              c.user.type === 'Bot' && c.body.startsWith(header)
+            const botComment = comments.find(
+              (c) => c.user.type === 'Bot' && c.body.startsWith(header)
             );
 
             if (botComment) {
+              console.log(`Updating existing SQL review comment: ${botComment.id}`);
               await github.rest.issues.updateComment({
                 owner,
                 repo,
@@ -94,6 +108,7 @@ jobs:
                 body,
               });
             } else {
+              console.log('Creating new SQL review comment');
               await github.rest.issues.createComment({
                 owner,
                 repo,
@@ -102,7 +117,7 @@ jobs:
               });
             }
 
-      # 5) 최종 실패 처리
+      # 6. 최종 상태를 GitHub Check 결과에 반영
       - name: Fail if SQL review failed
         if: steps.run_sql_review.outcome == 'failure'
         run: |
