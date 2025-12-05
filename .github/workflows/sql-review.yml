@@ -74,35 +74,39 @@ jobs:
             const header = '## SQL Review Report';
 
             if (!fs.existsSync(path)) {
-              console.log('⚠️ SQL review report file not found.');
+              console.log('sql_review_report.md not found, skip commenting.');
               return;
             }
 
             const body = fs.readFileSync(path, 'utf8');
 
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const issue_number = context.issue.number;
+
             // 기존 봇 코멘트가 있으면 업데이트, 없으면 새로 생성
             const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.name,
-              issue_number: context.issue.number,
+              owner,
+              repo,
+              issue_number,
             });
 
-            const botComment = comments.find(c =>
-              c.user.type === 'Bot' && c.body.includes(header)
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body && c.body.includes(header)
             );
 
-            if (botComment) {
+            if (existing) {
               await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.name,
-                comment_id: botComment.id,
-                body: body
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
               });
             } else {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.name,
-                issue_number: context.issue.number,
-                body: body
+                owner,
+                repo,
+                issue_number,
+                body,
               });
             }
