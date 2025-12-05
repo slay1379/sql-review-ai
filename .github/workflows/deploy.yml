@@ -62,49 +62,51 @@ jobs:
 
       # 4) PR 코멘트 달기 (핵심 ⭐)
       # if: always() -> 앞 단계(리뷰)가 실패해도 리포트는 반드시 달아야 함!
-      - name: Comment SQL Review Report on PR
-        if: github.event_name == 'pull_request' && always()
+      - name: Comment SQL review result on PR
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
-            const reportPath = 'sql_review_report.md';
+            const path = 'sql_review_report.md';
+            const header = '## SQL Review Report';
 
-            // 리포트 파일이 없으면 스킵 (터널링 실패 등 예외 상황)
-            if (!fs.existsSync(reportPath)) {
-              console.log("⚠️ SQL review report file not found.");
+            if (!fs.existsSync(path)) {
+              console.log('sql_review_report.md not found, skip commenting.');
               return;
             }
 
-            const body = fs.readFileSync(reportPath, 'utf8');
-            const header = "## SQL Review Report"; // 중복 댓글 방지용 식별자
+            const body = fs.readFileSync(path, 'utf8');
 
-            // 1. 기존 봇 댓글 찾기
+            // ✅ GitHub repo 정보 가져오기 (여기가 핵심)
+            const owner = context.repo.owner;
+            const repo  = context.repo.repo;
+            const issue_number = context.issue.number;
+
             const { data: comments } = await github.rest.issues.listComments({
-              owner: context.repo.owner,
-              repo: context.repo.name,
-              issue_number: context.issue.number,
+              owner,
+              repo,
+              issue_number,
             });
 
-            const botComment = comments.find(c => 
-              c.user.type === 'Bot' && c.body.includes(header)
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body && c.body.includes(header)
             );
 
-            // 2. 업데이트 또는 새로 생성
-            if (botComment) {
+            if (existing) {
               await github.rest.issues.updateComment({
-                owner: context.repo.owner,
-                repo: context.repo.name,
-                comment_id: botComment.id,
-                body: body
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
               });
             } else {
               await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.name,
-                issue_number: context.issue.number,
-                body: body
+                owner,
+                repo,
+                issue_number,
+                body,
               });
             }
 
