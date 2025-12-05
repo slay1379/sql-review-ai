@@ -81,16 +81,38 @@ jobs:
             const fs = require('fs');
             const path = 'sql_review_report.md';
             if (!fs.existsSync(path)) {
-              core.info('sql_review_report.md not found, skip comment.');
+              console.log('Report file not found.');
               return;
             }
             const body = fs.readFileSync(path, 'utf8');
+            const header = '## SQL Review Report'; // 리포트 식별용 헤더
 
-            await github.rest.issues.createComment({
+            //1. 기존 댓글 찾기
+            const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.name,
               issue_number: context.issue.number,
-              body,
             });
+
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes(header)
+            );
+
+            //2. 업데이트 또는 새로 생성
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.name,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.name,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
 
 
