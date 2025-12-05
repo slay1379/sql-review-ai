@@ -9,8 +9,9 @@ from typing import List
 import requests
 
 # --- Dify API 설정 ---
-DIFY_API_BASE = os.getenv("DIFY_API_BASE", "http://localhost:5001")
-DIFY_API_KEY = os.environ["DIFY_API_KEY"]  # 없으면 바로 에러 나도록
+DIFY_API_BASE = os.getenv("DIFY_API_BASE", "http://localhost:5001/v1")
+DIFY_API_KEY = os.getenv("DIFY_API_KEY")
+DIFY_WORKFLOW_ID = os.getenv("DIFY_WORKFLOW_ID")  # <- 이제 실제로 사용함
 
 
 def run(*args) -> str:
@@ -58,10 +59,18 @@ def extract_sql_from_file(path: str) -> List[str]:
 def call_dify_workflow(sql: str) -> str:
     """
     Dify Workflow 실행 API 호출.
+    - /workflows/{workflow_id}/run 엔드포인트 사용
     - inputs.sql_code 에 SQL 전달
     - blocking 모드로 리포트 마크다운을 받아온다.
     """
-    url = f"{DIFY_API_BASE.rstrip('/')}/workflows/run"
+    if not DIFY_API_KEY:
+        raise RuntimeError("DIFY_API_KEY 환경 변수가 설정되어 있지 않습니다.")
+    if not DIFY_WORKFLOW_ID:
+        raise RuntimeError("DIFY_WORKFLOW_ID 환경 변수가 설정되어 있지 않습니다.")
+
+    # 🔥 핵심 수정: workflow_id 를 URL path 에 넣어서 호출
+    url = f"{DIFY_API_BASE.rstrip('/')}/workflows/{DIFY_WORKFLOW_ID}/run"
+
     headers = {
         "Authorization": f"Bearer {DIFY_API_KEY}",
         "Content-Type": "application/json",
@@ -77,11 +86,27 @@ def call_dify_workflow(sql: str) -> str:
 
     print(f"[sql-review] call Dify workflow: {url}")
     resp = requests.post(url, headers=headers, json=payload, timeout=90)
-    resp.raise_for_status()
-    data = resp.json()
+
+    # 디버깅용 로그
+    print(f"[sql-review] Dify status: {resp.status_code}")
+    try:
+        data = resp.json()
+    except Exception:
+        print("[sql-review] ❌ Dify 응답 JSON 파싱 실패, raw text:")
+        print(resp.text)
+        resp.raise_for_status()
+        return ""
+
+    # 상태코드가 2xx 아니면 에러로 처리
+    if not resp.ok:
+        raise RuntimeError(f"Dify error: HTTP {resp.status_code}, body={data}")
 
     outputs = data.get("data", {}).get("outputs", {})
-    report_obj = outputs.get("markdown_report") or outputs.get("report") or outputs.get("text")
+    report_obj = (
+        outputs.get("markdown_report")
+        or outputs.get("report")
+        or outputs.get("text")
+    )
 
     if isinstance(report_obj, dict):
         return str(report_obj.get("value", ""))
@@ -163,8 +188,7 @@ def main() -> None:
         f.write("\n".join(report_sections))
 
     if any_rejected:
-        # 실패로 처리 (하지만 GitHub Actions에서 continue-on-error로
-        # 코멘트는 남기고, 마지막에 이 코드로 fail 시킬거야)
+        # 실패로 처리
         sys.exit(1)
 
 
