@@ -1,9 +1,5 @@
 name: SQL Review
 
-permissions:
-  contents: read
-  pull-requests: write
-
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -20,6 +16,10 @@ on:
       - '**/*.js'
       - '**/*.ts'
   workflow_dispatch: {}
+
+permissions:
+  contents: read
+  pull-requests: write   # PR 코멘트 쓰려면 필요
 
 jobs:
   sql-review:
@@ -55,39 +55,32 @@ jobs:
             -i private_key.pem
           echo "✅ SSH tunnel opened: localhost:8000 -> ${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000"
 
-      # 3) SQL 리뷰 스크립트 실행 (이제 localhost 로 호출)
+      # 3) SQL 리뷰 실행 (리포트 파일 생성까지)
       - name: Run SQL review
         env:
           SQL_REVIEW_API_URL: "http://localhost:8000/lint"
         run: |
           python .github/workflows/run_sql_review.py
 
-      - name: Attach SQL review report to Job Summary
-        if: always()
-        run: |
-          if [ -f sql_review_report.md ]; then
-            echo "## SQL Review Report" >> $GITHUB_STEP_SUMMARY
-            cat sql_review_report.md >> $GITHUB_STEP_SUMMARY
-          else
-            echo "sql_review_report.md not found" >> $GITHUB_STEP_SUMMARY
-          fi
-
-      - name: Comment SQL review result on PR
-        if: github.event_name == 'pull_request'
+      # 4) PR 에 SQL Review Report 코멘트 달기
+      - name: Comment SQL Review Report on PR
+        if: github.event_name == 'pull_request' && always()
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const path = 'sql_review_report.md';
+            const header = '## SQL Review Report';
+
             if (!fs.existsSync(path)) {
-              console.log('Report file not found.');
+              console.log('⚠️ SQL review report file not found.');
               return;
             }
-            const body = fs.readFileSync(path, 'utf8');
-            const header = '## SQL Review Report'; // 리포트 식별용 헤더
 
-            //1. 기존 댓글 찾기
+            const body = fs.readFileSync(path, 'utf8');
+
+            // 기존 봇 코멘트가 있으면 업데이트, 없으면 새로 생성
             const { data: comments } = await github.rest.issues.listComments({
               owner: context.repo.owner,
               repo: context.repo.name,
@@ -98,7 +91,6 @@ jobs:
               c.user.type === 'Bot' && c.body.includes(header)
             );
 
-            //2. 업데이트 또는 새로 생성
             if (botComment) {
               await github.rest.issues.updateComment({
                 owner: context.repo.owner,
@@ -114,5 +106,3 @@ jobs:
                 body: body
               });
             }
-
-
