@@ -6,12 +6,16 @@ on:
     paths:
       - '**/*.sql'
       - '**/*.py'
+      - '**/*.java'
+      - '**/*.xml'
   push:
     branches: [ "main" ]
     paths:
       - '**/*.sql'
       - '**/*.py'
       - '.github/workflows/**'
+      - '**/*.java'
+      - '**/*.xml'
 
 # 🔑 권한 설정
 permissions:
