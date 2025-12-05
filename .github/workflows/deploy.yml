@@ -11,6 +11,7 @@ on:
     paths:
       - '**/*.sql'
       - '**/*.py'
+      - '.github/workflows/**'
 
 # 🔑 권한 설정
 permissions:
