@@ -69,7 +69,7 @@ def call_dify_workflow(sql: str) -> str:
         raise RuntimeError("DIFY_WORKFLOW_ID 환경 변수가 설정되어 있지 않습니다.")
 
     # 🔥 핵심 수정: workflow_id 를 URL path 에 넣어서 호출
-    url = f"{DIFY_API_BASE.rstrip('/')}/workflows/{DIFY_WORKFLOW_ID}/run"
+    url = f"{DIFY_API_BASE.rstrip('/')}/workflows/run"
 
     headers = {
         "Authorization": f"Bearer {DIFY_API_KEY}",
