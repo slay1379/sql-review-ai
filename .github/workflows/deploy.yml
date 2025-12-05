@@ -1,70 +1,117 @@
-name: Deploy to EC2
+name: SQL Review and Deploy
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - '**/*.sql'
+      - '**/*.py'
   push:
     branches: [ "main" ]
+    paths:
+      - '**/*.sql'
+      - '**/*.py'
 
-env:
-  AWS_REGION: ap-northeast-2
-  DIFY_PRIVATE_IP: 10.0.137.89  # Dify 서버 프라이빗 IP (확인 필요!)
+# 🔑 권한 설정 (PR 코멘트 작성을 위해 필수!)
+permissions:
+  contents: read
+  pull-requests: write
 
 jobs:
-  build-and-push:
+  sql-review:
     runs-on: ubuntu-latest
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
 
-    - name: Configure AWS credentials
-      uses: aws-actions/configure-aws-credentials@v1
-      with:
-        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-        aws-region: ${{ env.AWS_REGION }}
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-    - name: Login to Amazon ECR
-      id: login-ecr
-      uses: aws-actions/amazon-ecr-login@v1
+      - name: Install dependencies
+        run: |
+          pip install requests
 
-    - name: Build, tag, and push image to Amazon ECR
-      env:
-        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-        ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-        IMAGE_TAG: latest
-      run: |
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+      # 1) SSH 키 설정
+      - name: Configure SSH Key
+        run: |
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
+          chmod 600 private_key.pem
 
-  deploy:
-    needs: build-and-push
-    runs-on: ubuntu-latest
-    steps:
-    - name: Deploy to Private EC2 via Bastion
-      uses: appleboy/ssh-action@v1.0.0
-      with:
-        host: ${{ env.DIFY_PRIVATE_IP }}
-        username: ec2-user
-        key: ${{ secrets.SSH_PRIVATE_KEY }}
-        proxy_host: ${{ secrets.BASTION_HOST }}
-        proxy_username: ec2-user
-        proxy_key: ${{ secrets.SSH_PRIVATE_KEY }}
-        script: |
-          echo "🚀 Starting Deployment..."
-          # AWS CLI 로그인 (ECR 권한 획득)
-          aws ecr get-login-password --region ap-northeast-2 | docker login --username AWS --password-stdin ${{ steps.login-ecr.outputs.registry }} || true
-          
-          # 폴더 이동
-          cd ~/dify/docker
-          
-          # docker-compose.yaml 수정 (이미지 경로를 ECR로 변경)
-          # (주의: 처음엔 수동으로 바꿔주는 게 안전하지만, 여기선 sed로 자동 교체 시도)
-          # 만약 로컬 빌드 이미지를 쓰고 있다면 이 부분은 스킵하고 수동으로 파일 고치는 게 나음.
-          
-          # 최신 이미지 Pull & 재실행
-          # (sqlfluff-api 서비스만 리프레시)
-          docker compose pull sqlfluff-api
-          docker compose up -d --no-deps sqlfluff-api
-          
-          # 안 쓰는 이미지 정리
-          docker image prune -f
-          echo "✅ Deployment Finished!"
+      # 2) Bastion 터널링 (Private SQLFluff API 연결)
+      - name: Start SSH Tunnel
+        run: |
+          ssh -o StrictHostKeyChecking=no -f -N \
+            -L 8000:${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000 \
+            ec2-user@${{ secrets.BASTION_HOST }} \
+            -i private_key.pem
+          echo "✅ SSH tunnel opened: localhost:8000 -> ${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000"
+
+      # 3) SQL 리뷰 실행 (결과는 sql_review_report.md 파일로 저장됨)
+      - name: Run SQL Review Script
+        id: review
+        env:
+          SQL_REVIEW_API_URL: "http://localhost:8000/lint"
+        run: |
+          # run_sql_review.py는 리포트를 생성하고, 문제 시 exit 1을 반환함
+          python .github/workflows/run_sql_review.py
+
+      # 4) PR 코멘트 달기 (핵심 ⭐)
+      # if: always() -> 앞 단계(리뷰)가 실패해도 리포트는 반드시 달아야 함!
+      - name: Comment SQL Review Report on PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const reportPath = 'sql_review_report.md';
+
+            // 리포트 파일이 없으면 스킵 (터널링 실패 등 예외 상황)
+            if (!fs.existsSync(reportPath)) {
+              console.log("⚠️ SQL review report file not found.");
+              return;
+            }
+
+            const body = fs.readFileSync(reportPath, 'utf8');
+            const header = "## SQL Review Report"; // 중복 댓글 방지용 식별자
+
+            // 1. 기존 봇 댓글 찾기
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.name,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c => 
+              c.user.type === 'Bot' && c.body.includes(header)
+            );
+
+            // 2. 업데이트 또는 새로 생성
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.name,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.name,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
+
+      # 5) Job Summary에도 남기기 (Actions 탭에서 보기용)
+      - name: Add to Job Summary
+        if: always()
+        run: |
+          if [ -f sql_review_report.md ]; then
+            cat sql_review_report.md >> $GITHUB_STEP_SUMMARY
+          fi
