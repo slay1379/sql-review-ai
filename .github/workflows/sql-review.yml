@@ -5,25 +5,18 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - '**/*.sql'
-      - '**/*.py'
-      - '**/*.js'
-      - '**/*.ts'
   push:
     branches: [ main ]
     paths:
       - '**/*.sql'
-      - '**/*.py'
-      - '**/*.js'
-      - '**/*.ts'
   workflow_dispatch: {}
-
-permissions:
-  contents: read
-  pull-requests: write   # PR 코멘트 쓰려면 필요
 
 jobs:
   sql-review:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
 
     steps:
       - name: Checkout repository
@@ -36,70 +29,68 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install dependencies for SQL review script
-        run: |
-          pip install requests
+      - name: Install dependencies
+        run: pip install requests
 
-      # 1) SSH 키 파일 만들기
+      # 1) SSH 키 설정
       - name: Configure SSH Key
         run: |
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
           chmod 600 private_key.pem
 
-      # 2) Bastion 통해서 내부 SQLFluff API 로 터널 열기
-      - name: Start SSH Tunnel
+      # 2) Bastion 터널링 (Dify API 포트 5001 연결)
+      # 주의: Dify API 포트가 80이면 80으로, 5001이면 5001로 수정하세요!
+      - name: Start SSH Tunnel to Dify API
         run: |
           ssh -o StrictHostKeyChecking=no -f -N \
-            -L 8000:${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000 \
+            -L 5001:${{ secrets.DIFY_PRIVATE_IP }}:5001 \
             ec2-user@${{ secrets.BASTION_HOST }} \
             -i private_key.pem
-          echo "✅ SSH tunnel opened: localhost:8000 -> ${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000"
+          echo "✅ SSH tunnel opened: localhost:5001 -> ${{ secrets.DIFY_PRIVATE_IP }}:5001"
 
-      # 3) SQL 리뷰 실행 (리포트 파일 생성까지)
-      - name: Run SQL review
+      # 3) Dify Workflow 호출 및 리포트 생성
+      - name: Run SQL review (call Dify workflow)
+        id: run_sql_review
         env:
-          SQL_REVIEW_API_URL: "http://localhost:8000/lint"
+          DIFY_API_BASE: "http://localhost:5001/v1" # 터널링 주소
+          DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
         run: |
           python .github/workflows/run_sql_review.py
+        continue-on-error: true
 
-      # 4) PR 에 SQL Review Report 코멘트 달기
-      - name: Comment SQL Review Report on PR
-        if: github.event_name == 'pull_request' && always()
+      # 4) PR 코멘트 작성
+      - name: Comment SQL review result on PR
+        if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const fs = require('fs');
             const path = 'sql_review_report.md';
-            const header = '## SQL Review Report';
-
             if (!fs.existsSync(path)) {
-              console.log('sql_review_report.md not found, skip commenting.');
+              console.log('sql_review_report.md not found. Skip comment.');
               return;
             }
-
             const body = fs.readFileSync(path, 'utf8');
-
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
+            const header = '# SQL Review Report';
+            const { owner, repo } = context.repo;
             const issue_number = context.issue.number;
 
-            // 기존 봇 코멘트가 있으면 업데이트, 없으면 새로 생성
             const { data: comments } = await github.rest.issues.listComments({
               owner,
               repo,
               issue_number,
             });
 
-            const existing = comments.find(c =>
-              c.user.type === 'Bot' && c.body && c.body.includes(header)
+            const botComment = comments.find(c =>
+              c.user.type === 'Bot' && c.body.startsWith(header)
             );
 
-            if (existing) {
+            if (botComment) {
               await github.rest.issues.updateComment({
                 owner,
                 repo,
-                comment_id: existing.id,
+                comment_id: botComment.id,
                 body,
               });
             } else {
@@ -110,3 +101,10 @@ jobs:
                 body,
               });
             }
+
+      # 5) 최종 실패 처리
+      - name: Fail if SQL review failed
+        if: steps.run_sql_review.outcome == 'failure'
+        run: |
+          echo "SQL review found problems. Failing check."
+          exit 1
