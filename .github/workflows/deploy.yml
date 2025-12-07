@@ -8,14 +8,15 @@ on:
       - '**/*.py'
       - '**/*.java'
       - '**/*.xml'
+      - '.github/workflows/**'
   push:
     branches: [ "main" ]
     paths:
       - '**/*.sql'
       - '**/*.py'
-      - '.github/workflows/**'
       - '**/*.java'
       - '**/*.xml'
+      - '.github/workflows/**'
 
 # 🔑 권한 설정
 permissions:
@@ -41,46 +42,61 @@ jobs:
         run: |
           pip install requests
 
-      # 1) SSH 키 설정
-      - name: Configure SSH Key
-        run: |
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > private_key.pem
-          chmod 600 private_key.pem
+      # ----------------------------------------------------------------
+      # [NEW] 1. AWS 자격 증명 설정 (IAM User Key 사용)
+      # ----------------------------------------------------------------
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
 
-      # 2) Bastion 터널링 (SQLFluff:8000 및 Dify:5001 동시 연결)
-      # ⚠️ 주의: Dify가 다른 서버라면 secrets.DIFY_PRIVATE_IP 사용, 같은 서버면 SQLFLUFF_PRIVATE_IP 사용
-      - name: Start SSH Tunnels
+      # ----------------------------------------------------------------
+      # [NEW] 2. Session Manager Plugin 설치 (터널링 필수 도구)
+      # ----------------------------------------------------------------
+      - name: Install Session Manager Plugin
         run: |
-          # 1. SQLFluff Tunnel (8000)
-          ssh -o StrictHostKeyChecking=no -f -N \
-            -L 8000:${{ secrets.SQLFLUFF_PRIVATE_IP }}:8000 \
-            ec2-user@${{ secrets.BASTION_HOST }} \
-            -i private_key.pem
+          curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o "session-manager-plugin.deb"
+          sudo dpkg -i session-manager-plugin.deb
+
+      # ----------------------------------------------------------------
+      # [NEW] 3. SSM 포트 포워딩 시작 (Bastion 없이 직접 연결)
+      # - Linter(8000)와 Dify(5001) 포트를 동시에 엽니다.
+      # ----------------------------------------------------------------
+      - name: Start SSM Port Forwarding
+        run: |
+          echo "🚀 Starting SSM tunnels to ${{ secrets.DIFY_INSTANCE_ID }}..."
           
-          # 2. Dify Tunnel (5001) - 중요! 파이썬 스크립트가 호출함
-          ssh -o StrictHostKeyChecking=no -f -N \
-            -L 5001:${{ secrets.DIFY_PRIVATE_IP }}:5001 \
-            ec2-user@${{ secrets.BASTION_HOST }} \
-            -i private_key.pem
-            
-          echo "✅ SSH tunnels opened: 8000(Linter), 5001(Dify)"
+          # 1. SQLFluff API (8000 -> 8000)
+          aws ssm start-session \
+            --target ${{ secrets.DIFY_INSTANCE_ID }} \
+            --document-name AWS-StartPortForwardingSession \
+            --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}' > /dev/null 2>&1 &
+          
+          # 2. Dify API (5001 -> 5001)
+          aws ssm start-session \
+            --target ${{ secrets.DIFY_INSTANCE_ID }} \
+            --document-name AWS-StartPortForwardingSession \
+            --parameters '{"portNumber":["5001"],"localPortNumber":["5001"]}' > /dev/null 2>&1 &
+          
+          # 터널 안정화 대기
+          sleep 5
+          echo "✅ SSM Tunnels started."
 
-      # 3) SQL 리뷰 실행 (환경변수 주입 필수!)
+      # 4. SQL 리뷰 스크립트 실행
       - name: Run SQL Review Script
         id: review
         env:
-          # 👇 여기가 빠져서 에러가 났던 것입니다.
           DIFY_API_BASE: "http://localhost:5001/v1"
           DIFY_API_KEY: ${{ secrets.DIFY_API_KEY }}
           DIFY_WORKFLOW_ID: ${{ secrets.DIFY_WORKFLOW_ID }}
-          # (선택) 기존 Linter URL
           SQL_REVIEW_API_URL: "http://localhost:8000/lint"
         run: |
           python .github/workflows/run_sql_review.py
-        # 리뷰 실패해도 리포트는 남겨야 하므로 에러 무시하고 진행
-        continue-on-error: true 
+        continue-on-error: true
 
-      # 4) PR 코멘트 달기
+      # 5. PR 코멘트 작성
       - name: Comment SQL review result on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
@@ -89,7 +105,7 @@ jobs:
           script: |
             const fs = require('fs');
             const path = 'sql_review_report.md';
-            const header = '# SQL Review Report'; // 파이썬 스크립트의 헤더와 일치시킬 것
+            const header = '# SQL Review Report';
 
             if (!fs.existsSync(path)) {
               console.log('sql_review_report.md not found, skip commenting.');
@@ -126,7 +142,7 @@ jobs:
               });
             }
 
-      # 5) 최종 실패 처리 (리뷰가 실패했으면 Actions도 빨간불로 만들기)
+      # 6. 최종 실패 처리
       - name: Fail if SQL review failed
         if: steps.review.outcome == 'failure'
         run: exit 1
