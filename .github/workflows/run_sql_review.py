@@ -1,4 +1,5 @@
 import os
+import re
 import subprocess
 import sys
 import glob
@@ -35,23 +36,37 @@ def get_changed_files() -> List[str]:
     return [f for f in files if f.endswith(TARGET_EXTENSIONS) and os.path.exists(f)]
 
 def get_file_contents(path: str) -> List[str]:
-    # XML만 태그 추출, 나머지는 통째로 읽기
+    # 1. XML 처리
     if path.endswith('.xml'):
         try:
             tree = ET.parse(path)
             sql_list = []
             for tag in ['select', 'insert', 'update', 'delete']:
                 for el in tree.getroot().iter(tag):
-                    if el.text: sql_list.append(f"\n{el.text.strip()}")
+                    if el.text:
+                        # ✨ 수정됨: XML 내용도 마스킹 처리
+                        clean_sql = mask_pii(el.text.strip())
+                        sql_list.append(f"\n{clean_sql}")
             return sql_list
         except: return []
     
-    # Java, Python, SQL 등
+    # 2. Java, Python, SQL 등 일반 파일 처리
     try:
+        # 대용량 파일 처리 로직이 있다면 거기에도 적용해야 합니다.
+        # 여기서는 기본 로직 기준으로 설명합니다.
         with open(path, 'r', encoding='utf-8') as f:
-            content = f.read().strip()
-            return [content] if content else []
-    except: return []
+            content = f.read()
+            
+            # ✨ 핵심 수정 포인트! ✨
+            # AI에게 보내기 전에 마스킹 함수를 먼저 통과시킵니다.
+            masked_content = mask_pii(content)
+            
+            # (대용량 파일 처리 로직이 있다면 masked_content를 넘기세요)
+            return [masked_content] if masked_content.strip() else []
+            
+    except Exception as e:
+        print(f"[Error] Reading {path}: {e}")
+        return []
 
 def call_dify_workflow(content: str, file_name: str) -> str:
     url = f"{DIFY_API_BASE.rstrip('/')}/workflows/run" # 또는 /chat-messages (앱 유형에 따라 다름)
@@ -91,6 +106,32 @@ def call_dify_workflow(content: str, file_name: str) -> str:
 def is_rejected(text: str) -> bool:
     # 반려 키워드 체크
     return any(k in text for k in ["상태: 반려", "상태: Fail", "Status: Fail", "심각한", "취약점"])
+
+def mask_pii(text: str) -> str:
+    """
+    소스코드 내의 민감정보(PII)를 찾아 마스킹 처리합니다.
+    """
+    if not text:
+        return text
+
+    # 1. 주민등록번호 (외국인등록번호 포함) 패턴
+    # 예: 900101-1234567 또는 9001011234567 -> 900101-*******
+    # 설명: 앞6자리 + 구분자(-, 공백, 없음) + 뒤7자리 (1~4로 시작)
+    rrn_pattern = r'(?<!\d)(\d{6})[-\s]*([1-4]\d{6})(?!\d)'
+    text = re.sub(rrn_pattern, r'\1-*******', text)
+
+    # 2. 휴대전화번호 패턴
+    # 예: 010-1234-5678 또는 01012345678 -> 010-****-5678
+    phone_pattern = r'(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})'
+    text = re.sub(phone_pattern, r'\1-****-\3', text)
+
+    # 3. 이메일 주소 패턴
+    # 예: user@example.com -> ***@example.com
+    # 설명: @ 앞부분을 무조건 ***로 치환
+    email_pattern = r'([a-zA-Z0-9._%+-]+)(@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+    text = re.sub(email_pattern, r'***\2', text)
+
+    return text
 
 def main():
     target_files = get_changed_files()
