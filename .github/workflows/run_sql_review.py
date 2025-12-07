@@ -157,9 +157,32 @@ def call_dify_workflow(content: str, file_name: str) -> str:
         return f"❌ 연결 오류: {str(e)}"
 
 def is_rejected(report_markdown: str) -> bool:
-    # 리포트 텍스트 내에 '반려', 'Fail', 'Critical' 등의 키워드가 있는지 확인
-    keywords = ["반려", "Fail", "Critical", "위험", "부적합"]
-    return any(k in report_markdown for k in keywords)
+    """
+    리포트 내용을 분석하여 반려 여부를 결정합니다.
+    단순 키워드 매칭이 아니라, 문맥이나 명확한 상태 표시를 찾도록 개선했습니다.
+    """
+    # 1. 확실한 반려 멘트가 있는지 확인
+    failure_indicators = [
+        "상태: 반려",
+        "상태: Fail",
+        "Status: Reject",
+        "Status: Fail",
+        "심각한 보안 위협", # 단순 '위험' 단어 제외
+        "SQL Injection 취약점이 발견",
+        "권한 우회 가능성",
+        "스키마 불일치 (치명적)"
+    ]
+    
+    for indicator in failure_indicators:
+        if indicator in report_markdown:
+            return True
+            
+    # 2. '승인'이라는 단어가 있지만 '조건부'인 경우는 통과로 처리 (사용자 정책에 따라 변경 가능)
+    # 만약 '조건부 승인'도 반려하고 싶다면 아래 주석을 해제하세요.
+    # if "승인(조건부)" in report_markdown:
+    #     return True
+
+    return False
 
 def main():
     target_files = get_changed_files()
