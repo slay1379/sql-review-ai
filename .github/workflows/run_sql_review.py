@@ -82,6 +82,17 @@ def call_dify_workflow(content: str, file_name: str) -> str:
     try:
         print(f"[sql-review] Sending {file_name} to Dify...")
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if not resp.ok:
+            print(f"[Error] API Status: {resp.status_code}")
+            return f"❌ API 오류: {resp.status_code}"
+
+        data = resp.json()
+        
+        # ✨ [디버깅용 로그 추가] ✨ 
+        # 이 로그가 깃허브 액션에 찍히면 원인을 바로 알 수 있습니다.
+        print(f"🔥 [DEBUG] Dify Raw Response: {data}") 
+
+        outputs = data.get("data", {}).get("outputs", {})
         data = resp.json()
 
         # 응답 파싱 (Workflow vs ChatApp 호환성 확보)
