@@ -18,6 +18,7 @@ on:
       - '**/*.xml'
       - '.github/workflows/**'
 
+# 🔑 권한 설정
 permissions:
   contents: read
   pull-requests: write
@@ -83,7 +84,7 @@ jobs:
           sleep 5
           echo "✅ SSM Tunnels started."
 
-      # 4. SQL 리뷰 스크립트 실행 (기존 코드 유지)
+      # 4. SQL 리뷰 스크립트 실행
       - name: Run SQL Review Script
         id: review
         env:
@@ -95,7 +96,7 @@ jobs:
           python .github/workflows/run_sql_review.py
         continue-on-error: true
 
-      # 5. PR 코멘트 작성 (기존 코드 유지)
+      # 5. PR 코멘트 작성
       - name: Comment SQL review result on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
