@@ -41,9 +41,7 @@ jobs:
         run: |
           pip install requests
 
-      # ----------------------------------------------------------------
-      # [NEW] 1. AWS 자격 증명 설정 (IAM User Key 사용)
-      # ----------------------------------------------------------------
+      # 1. AWS 자격 증명 설정
       - name: Configure AWS Credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -51,39 +49,45 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ----------------------------------------------------------------
-      # [NEW] 2. Session Manager Plugin 설치 (터널링 필수 도구)
-      # ----------------------------------------------------------------
+      # 2. Session Manager Plugin 설치
       - name: Install Session Manager Plugin
         run: |
           curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o "session-manager-plugin.deb"
           sudo dpkg -i session-manager-plugin.deb
 
-      # ----------------------------------------------------------------
-      # [NEW] 3. SSM 포트 포워딩 시작 (Bastion 없이 직접 연결)
-      # - Linter(8000)와 Dify(5001) 포트를 동시에 엽니다.
-      # ----------------------------------------------------------------
+      # 3. SSM 포트 포워딩 시작 (스마트 대기 로직 적용)
       - name: Start SSM Port Forwarding
         run: |
           echo "🚀 Starting SSM tunnels to ${{ secrets.DIFY_INSTANCE_ID }}..."
           
-          # 1. SQLFluff API (8000 -> 8000)
+          # 로그 확인을 위해 출력을 파일로 저장
           aws ssm start-session \
             --target ${{ secrets.DIFY_INSTANCE_ID }} \
             --document-name AWS-StartPortForwardingSession \
-            --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}' > /dev/null 2>&1 &
+            --parameters '{"portNumber":["8000"],"localPortNumber":["8000"]}' > ssm_8000.log 2>&1 &
           
-          # 2. Dify API (5001 -> 5001)
           aws ssm start-session \
             --target ${{ secrets.DIFY_INSTANCE_ID }} \
             --document-name AWS-StartPortForwardingSession \
-            --parameters '{"portNumber":["5001"],"localPortNumber":["5001"]}' > /dev/null 2>&1 &
+            --parameters '{"portNumber":["5001"],"localPortNumber":["5001"]}' > ssm_5001.log 2>&1 &
           
-          # 터널 안정화 대기
-          sleep 5
-          echo "✅ SSM Tunnels started."
+          # [핵심] 무작정 기다리는 게 아니라, 포트가 열릴 때까지 체크함
+          echo "⏳ Waiting for port 5001 to open..."
+          for i in {1..15}; do
+            if curl -s http://localhost:5001/v1 >/dev/null || curl -s http://localhost:5001 >/dev/null; then
+              echo "✅ Connection confirmed! Port 5001 is open."
+              exit 0
+            fi
+            echo "   ... attempt $i: Port not ready yet. Retrying in 2s..."
+            sleep 2
+          done
+          
+          echo "❌ Failed to connect to Dify (5001) after 30 seconds."
+          echo "--- SSM Log (5001) ---"
+          cat ssm_5001.log
+          exit 1
 
-      # 4. SQL 리뷰 스크립트 실행 (기존 코드 유지)
+      # 4. SQL 리뷰 스크립트 실행
       - name: Run SQL Review Script
         id: review
         env:
@@ -95,7 +99,7 @@ jobs:
           python .github/workflows/run_sql_review.py
         continue-on-error: true
 
-      # 5. PR 코멘트 작성 (기존 코드 유지)
+      # 5. PR 코멘트 작성
       - name: Comment SQL review result on PR
         if: github.event_name == 'pull_request'
         uses: actions/github-script@v7
