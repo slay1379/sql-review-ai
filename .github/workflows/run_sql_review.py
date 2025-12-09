@@ -116,33 +116,32 @@ def call_dify_workflow(content: str, file_name: str) -> str:
 
 def is_rejected(report_markdown: str) -> bool:
     """
-    리포트 텍스트에서 '반려' 또는 '실패'를 의미하는 키워드를 강력하게 검색합니다.
+    리포트의 '상태' 섹션을 분석하여 반려 여부를 판단합니다.
+    단순히 본문에 '반려'나 '치명적인'이라는 단어가 있다고 해서 막지 않고,
+    실제 판정 결과가 반려인 경우에만 True를 반환합니다.
     """
     if not report_markdown:
         return False
 
-    # 검출할 키워드 목록 (하나라도 있으면 Fail 처리)
-    # AI가 테이블 포맷, 리스트 포맷 등 다양하게 줄 수 있으므로 핵심 단어 위주로 등록
-    failure_keywords = [
-        "반려",              # 가장 확실한 키워드
-        "상태: 반려",
-        "상태: Fail",
-        "Status: Reject",
-        "Status: Fail",
-        "치명적인",           # "치명적인 스키마 오류" 등
-        "Critical",          # 영어권 응답 대비
-        "보안 위험",          # "보안 위험 (High/Medium)"
-        "Security Risk",
-        "스키마 불일치",       # "치명적인 스키마 불일치"
-        "Schema Mismatch"
-    ]
-    
-    # 텍스트 내에 키워드가 하나라도 포함되어 있는지 확인
-    for keyword in failure_keywords:
-        if keyword in report_markdown:
-            print(f"[sql-review] 반려 키워드 감지됨: '{keyword}'")
-            return True
+    # 1. [가장 확실] 상태 라인 직접 파싱 (Markdown 헤더 패턴)
+    # 예: "상태: 반려 (Reject)", "상태: Fail", "- 상태: 반려" 등
+    # 정규식 설명: '상태' 뒤에 '반려', 'Fail', 'Reject'가 오면 잡음
+    status_pattern = r"(상태|Status)\s*[:\-]?\s*(.*)(반려|Fail|Reject|치명적인\s*오류)"
+    match = re.search(status_pattern, report_markdown, re.IGNORECASE)
+    if match:
+        print(f"[sql-review] 상태 판정 감지됨: '{match.group(0)}'")
+        return True
 
+    # 2. [보조] 명확한 반려 헤더가 있는 경우
+    # 예: "## 1. 검토 결과 ... 반려 (Reject)" 패턴이 근처에 있을 때
+    if "반려 (Reject)" in report_markdown or "Status: Reject" in report_markdown:
+        print("[sql-review] 명확한 반려 상태(Reject) 키워드 감지됨")
+        return True
+
+    # 3. [예외 처리] 본문에 '치명적인'이 있어도, '제외하였으며' 같은 부정어가 뒤에 오면 무시해야 함
+    # 하지만 이걸 일일이 코딩하기 어려우므로, 위 1, 2번에서 안 걸렸으면 통과시킴.
+    # 즉, 본문 설명에 "치명적인 오류는 없었습니다"라고 쓴 걸 잡지 않도록 함.
+    
     return False
 
 def mask_pii(text: str) -> str:
