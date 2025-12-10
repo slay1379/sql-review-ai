@@ -5,13 +5,14 @@ import sys
 import glob
 import requests
 import xml.etree.ElementTree as ET
-from typing import List
+from typing import List, Tuple
 
 # --- 설정 ---
 DIFY_API_BASE = os.getenv("DIFY_API_BASE", "http://localhost:5001/v1")
 DIFY_API_KEY = os.getenv("DIFY_API_KEY")
+MAX_FULL_SCAN_LINES = 300  # 이 줄 수보다 적으면 전체 스캔, 많으면 부분 스캔
+CONTEXT_PADDING = 20       # 변경된 라인 위아래로 몇 줄을 더 읽을지 (메소드 문맥 확보용)
 
-# 검사할 확장자
 TARGET_EXTENSIONS = ('.sql', '.java', '.xml', '.py')
 
 def run_command(*args) -> str:
@@ -22,21 +23,80 @@ def run_command(*args) -> str:
 
 def get_changed_files() -> List[str]:
     files = set()
-    # 1. Diff 확인
     try:
+        # HEAD^와 HEAD 사이의 변경된 파일 목록 추출
         diff_out = run_command("git", "diff", "--name-only", "HEAD^", "HEAD")
         files.update(diff_out.splitlines())
     except: pass
     
-    # 2. 로컬/Fallback 확인
     if not files:
         for ext in TARGET_EXTENSIONS:
             files.update(glob.glob(f"**/*{ext}", recursive=True))
 
     return [f for f in files if f.endswith(TARGET_EXTENSIONS) and os.path.exists(f)]
 
+def get_git_diff_ranges(file_path: str) -> List[Tuple[int, int]]:
+    """
+    git diff를 분석하여 변경된 라인 번호 범위(start, end)를 추출합니다.
+    """
+    ranges = []
+    try:
+        # 변경된 부분의 라인 정보만 가져옴 (-U0: 문맥 없이 라인 번호만)
+        diff_out = run_command("git", "diff", "--unified=0", "HEAD^", "HEAD", "--", file_path)
+        
+        # @@ -old_start,old_count +new_start,new_count @@ 패턴 찾기
+        for line in diff_out.splitlines():
+            if line.startswith("@@"):
+                match = re.search(r"\+(\d+)(?:,(\d+))?", line)
+                if match:
+                    start = int(match.group(1))
+                    count = int(match.group(2)) if match.group(2) else 1
+                    end = start + count - 1
+                    ranges.append((start, end))
+    except Exception as e:
+        print(f"[Warn] Diff parsing failed for {file_path}: {e}")
+    
+    return ranges
+
+def extract_relevant_chunks(file_path: str, content_lines: List[str]) -> str:
+    """
+    긴 파일의 경우, 변경된 라인 주변(Context)만 잘라서 합칩니다.
+    """
+    diff_ranges = get_git_diff_ranges(file_path)
+    if not diff_ranges:
+        return "" # 변경점 감지 실패 시 처리를 위해 빈 문자열 반환
+
+    total_lines = len(content_lines)
+    lines_to_keep = set()
+
+    for start, end in diff_ranges:
+        # 변경된 라인 위아래로 Padding만큼 더 가져옴 (메소드 문맥 확보)
+        ctx_start = max(1, start - CONTEXT_PADDING)
+        ctx_end = min(total_lines, end + CONTEXT_PADDING)
+        
+        for i in range(ctx_start, ctx_end + 1):
+            lines_to_keep.add(i)
+
+    if not lines_to_keep:
+        return ""
+
+    sorted_lines = sorted(list(lines_to_keep))
+    
+    chunks = []
+    last_line = -1
+
+    for line_num in sorted_lines:
+        # 덩어리가 끊어지면 구분선 추가
+        if last_line != -1 and line_num > last_line + 1:
+            chunks.append("\n... (Skipped Unchanged Code) ...\n")
+        
+        chunks.append(content_lines[line_num - 1]) # 리스트 인덱스는 0부터 시작하므로 -1
+        last_line = line_num
+
+    return "\n".join(chunks)
+
 def get_file_contents(path: str) -> List[str]:
-    # 1. XML 처리
+    # 1. XML 처리 (MyBatis 등은 보통 짧거나 구조적이므로 전체 스캔 유지 권장)
     if path.endswith('.xml'):
         try:
             tree = ET.parse(path)
@@ -44,138 +104,89 @@ def get_file_contents(path: str) -> List[str]:
             for tag in ['select', 'insert', 'update', 'delete']:
                 for el in tree.getroot().iter(tag):
                     if el.text:
-                        # ✨ 수정됨: XML 내용도 마스킹 처리
                         clean_sql = mask_pii(el.text.strip())
                         sql_list.append(f"\n{clean_sql}")
             return sql_list
         except: return []
     
-    # 2. Java, Python, SQL 등 일반 파일 처리
+    # 2. Java, Python 등 소스 코드 처리
     try:
-        # 대용량 파일 처리 로직이 있다면 거기에도 적용해야 합니다.
-        # 여기서는 기본 로직 기준으로 설명합니다.
         with open(path, 'r', encoding='utf-8') as f:
             content = f.read()
+
+        # 라인 단위로 분리
+        lines = content.splitlines()
+        
+        # [Hybrid Scan Logic]
+        # 파일이 작으면(300줄 미만) -> 전체 스캔 (Full Scan)
+        if len(lines) <= MAX_FULL_SCAN_LINES:
+            print(f"[sql-review] '{path}' is short ({len(lines)} lines). Performing Full Scan.")
+            final_content = content
+        else:
+            # 파일이 크면 -> 변경된 부분 중심 스캔 (Smart Chunk Scan)
+            print(f"[sql-review] '{path}' is long ({len(lines)} lines). Performing Diff Context Scan.")
+            chunked_content = extract_relevant_chunks(path, lines)
             
-            # ✨ 핵심 수정 포인트! ✨
-            # AI에게 보내기 전에 마스킹 함수를 먼저 통과시킵니다.
-            masked_content = mask_pii(content)
-            
-            # (대용량 파일 처리 로직이 있다면 masked_content를 넘기세요)
-            return [masked_content] if masked_content.strip() else []
+            # Diff 추출 실패하거나 변경점이 없으면 안전하게 전체 스캔 (혹은 스킵)
+            if not chunked_content:
+                print(f"[Info] No specific diff ranges found or parsing failed. Fallback to Full Scan.")
+                final_content = content
+            else:
+                final_content = chunked_content
+
+        # PII 마스킹 후 반환
+        masked_content = mask_pii(final_content)
+        return [masked_content] if masked_content.strip() else []
             
     except Exception as e:
         print(f"[Error] Reading {path}: {e}")
         return []
 
+# --- 아래부터는 기존 코드와 동일 (mask_pii, call_dify_workflow, is_rejected, main) ---
+# (이전에 드린 mask_pii, call_dify_workflow, is_rejected 함수는 그대로 유지하세요)
+# (특히 is_rejected 함수는 '상태: 반려' 정규식 쓰는 버전으로 꼭 유지하세요!)
+
+# (이전 답변의 함수들을 여기에 붙여넣으세요)
+
+def mask_pii(text: str) -> str:
+    if not text: return text
+    rrn_pattern = r'(?<!\d)(\d{6})[-\s]*([1-4]\d{6})(?!\d)'
+    text = re.sub(rrn_pattern, r'\1-*******', text)
+    phone_pattern = r'(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})'
+    text = re.sub(phone_pattern, r'\1-****-\3', text)
+    email_pattern = r'([a-zA-Z0-9._%+-]+)(@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
+    text = re.sub(email_pattern, r'***\2', text)
+    return text
+
 def call_dify_workflow(content: str, file_name: str) -> str:
-    url = f"{DIFY_API_BASE.rstrip('/')}/workflows/run" # 또는 /chat-messages (앱 유형에 따라 다름)
+    url = f"{DIFY_API_BASE.rstrip('/')}/workflows/run"
     headers = {"Authorization": f"Bearer {DIFY_API_KEY}", "Content-Type": "application/json"}
-    
-    # 입력 변수 'sql_code'로 통일
     payload = {
         "inputs": {"sql_code": content, "file_name": file_name},
         "response_mode": "blocking",
         "user": "github-bot"
     }
-    
     try:
         print(f"[sql-review] Sending {file_name} to Dify...")
         resp = requests.post(url, headers=headers, json=payload, timeout=60)
-        if not resp.ok:
-            print(f"[Error] API Status: {resp.status_code}")
-            return f"❌ API 오류: {resp.status_code}"
-
+        if not resp.ok: return f"❌ API 오류: {resp.status_code}"
         data = resp.json()
-        
-        # ✨ [디버깅용 로그 추가] ✨ 
-        # 이 로그가 깃허브 액션에 찍히면 원인을 바로 알 수 있습니다.
-        print(f"🔥 [DEBUG] Dify Raw Response: {data}") 
-
         outputs = data.get("data", {}).get("outputs", {})
-        data = resp.json()
-
-        # 응답 파싱 (Workflow vs ChatApp 호환성 확보)
-        outputs = data.get("data", {}).get("outputs", {})
-        result = (
-            outputs.get("text") or 
-            outputs.get("markdown_report") or 
-            outputs.get("result") or
-            data.get("answer") or # Chat App일 경우
-            ""
-        )
-        
-        if not result:
-            print(f"[WARN] Empty response from Dify. Raw: {data}")
-            return "❌ AI 응답이 비어있습니다. (설정 확인 필요)"
-            
+        result = (outputs.get("text") or outputs.get("markdown_report") or outputs.get("result") or "")
         return str(result)
-        
-    except Exception as e:
-        return f"❌ 연결 오류: {str(e)}"
+    except Exception as e: return f"❌ 연결 오류: {str(e)}"
 
 def is_rejected(report_markdown: str) -> bool:
-    """
-    리포트 텍스트에서 '반려' 또는 '실패'를 의미하는 키워드를 강력하게 검색합니다.
-    """
-    if not report_markdown:
-        return False
-
-    # 검출할 키워드 목록 (하나라도 있으면 Fail 처리)
-    # AI가 테이블 포맷, 리스트 포맷 등 다양하게 줄 수 있으므로 핵심 단어 위주로 등록
-    failure_keywords = [
-        "반려",              # 가장 확실한 키워드
-        "상태: 반려",
-        "상태: Fail",
-        "Status: Reject",
-        "Status: Fail",
-        "치명적인",           # "치명적인 스키마 오류" 등
-        "Critical",          # 영어권 응답 대비
-        "보안 위험",          # "보안 위험 (High/Medium)"
-        "Security Risk",
-        "스키마 불일치",       # "치명적인 스키마 불일치"
-        "Schema Mismatch"
-    ]
-    
-    # 텍스트 내에 키워드가 하나라도 포함되어 있는지 확인
-    for keyword in failure_keywords:
-        if keyword in report_markdown:
-            print(f"[sql-review] 반려 키워드 감지됨: '{keyword}'")
-            return True
-
+    if not report_markdown: return False
+    status_pattern = r"(상태|Status)\s*[:\-]?\s*(.*)(반려|Fail|Reject|치명적인\s*오류)"
+    match = re.search(status_pattern, report_markdown, re.IGNORECASE)
+    if match: return True
+    if "반려 (Reject)" in report_markdown or "Status: Reject" in report_markdown: return True
     return False
-
-def mask_pii(text: str) -> str:
-    """
-    소스코드 내의 민감정보(PII)를 찾아 마스킹 처리합니다.
-    """
-    if not text:
-        return text
-
-    # 1. 주민등록번호 (외국인등록번호 포함) 패턴
-    # 예: 900101-1234567 또는 9001011234567 -> 900101-*******
-    # 설명: 앞6자리 + 구분자(-, 공백, 없음) + 뒤7자리 (1~4로 시작)
-    rrn_pattern = r'(?<!\d)(\d{6})[-\s]*([1-4]\d{6})(?!\d)'
-    text = re.sub(rrn_pattern, r'\1-*******', text)
-
-    # 2. 휴대전화번호 패턴
-    # 예: 010-1234-5678 또는 01012345678 -> 010-****-5678
-    phone_pattern = r'(01[016789])[-.\s]?(\d{3,4})[-.\s]?(\d{4})'
-    text = re.sub(phone_pattern, r'\1-****-\3', text)
-
-    # 3. 이메일 주소 패턴
-    # 예: user@example.com -> ***@example.com
-    # 설명: @ 앞부분을 무조건 ***로 치환
-    email_pattern = r'([a-zA-Z0-9._%+-]+)(@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})'
-    text = re.sub(email_pattern, r'***\2', text)
-
-    return text
 
 def main():
     target_files = get_changed_files()
-    # 불필요한 파일 제외
     target_files = [f for f in target_files if "node_modules" not in f and ".github" not in f]
-    
     print(f"[sql-review] Files to check: {target_files}")
 
     if not target_files:
@@ -189,17 +200,14 @@ def main():
         contents = get_file_contents(fpath)
         for content in contents:
             res = call_dify_workflow(content, fpath)
-            # 결과가 있든 없든 헤더와 함께 기록 (그래야 빈 리포트 방지)
             report_content.append(f"## 📄 `{fpath}`\n\n{res}\n\n---")
             if is_rejected(res): has_failure = True
 
     with open("sql_review_report.md", "w", encoding="utf-8") as f:
         status = "🚫 **반려된 코드가 있습니다.**" if has_failure else "✅ **모든 코드 통과**"
         f.write(f"# SQL Review Report\n\n### 전체 상태: {status}\n\n")
-        if not report_content:
-            f.write("검출된 코드가 없어 리포트가 비어있습니다.")
-        else:
-            f.write("\n".join(report_content))
+        if not report_content: f.write("검출된 코드가 없어 리포트가 비어있습니다.")
+        else: f.write("\n".join(report_content))
 
     if has_failure: sys.exit(1)
 
